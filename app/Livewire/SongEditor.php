@@ -5,6 +5,7 @@ namespace App\Livewire;
 use App\Models\Song;
 use App\Models\SongLine;
 use App\Models\SongSection;
+use App\Services\ChordDiagramService;
 use App\Services\ChordPro\ChordTransposer;
 use Illuminate\Support\Facades\DB;
 use Livewire\Component;
@@ -61,11 +62,60 @@ class SongEditor extends Component
         $this->semitones = 0;
     }
 
+    /**
+     * Aplica la transposición actual de forma permanente a todas las líneas
+     * y guarda los cambios en la base de datos.
+     */
+    public function saveTransposition(): void
+    {
+        if ($this->semitones === 0) {
+            return;
+        }
+
+        DB::transaction(function () {
+            // 1. Transponer y guardar cada línea de la canción
+            foreach ($this->song->sections as $section) {
+                foreach ($section->lines as $line) {
+                    if (! empty($line->content) && $line->type === 'chord_lyrics') {
+                        $line->update([
+                            'content' => $this->transposeLineContent($line->content, $this->semitones),
+                        ]);
+                    }
+                }
+            }
+
+            // 2. Actualizar el tono de la canción
+            $newKey = $this->transpositionState['newKey'] ?? $this->song->original_key;
+            $this->song->update([
+                'original_key' => $newKey,
+            ]);
+        });
+
+        // 3. Resetear semitonos a 0 y recargar la estructura fresca
+        $this->semitones = 0;
+        $this->refreshSong();
+
+        $this->dispatch('notify', message: 'Tono guardado correctamente de forma permanente.');
+    }
+
+    /**
+     * Reemplaza todos los acordes en corchetes [Acorde] transponiéndolos según los semitonos indicados.
+     */
+    private function transposeLineContent(string $content, int $semitones): string
+    {
+        return preg_replace_callback('/\[([^\]]+)\]/', function ($matches) use ($semitones) {
+            $chord = $matches[1];
+            $transposed = ChordTransposer::transposeChord($chord, $semitones);
+
+            return "[{$transposed}]";
+        }, $content);
+    }
+
     private function buildRawChordPro(): string
     {
         $content = [];
         foreach ($this->song->sections as $section) {
-            $content[] = '{'.$section->type.': '.($section->label ?? '').'}';
+            $content[] = '{' . $section->type . ': ' . ($section->label ?? '') . '}';
             foreach ($section->lines as $line) {
                 $content[] = $line->content;
             }
@@ -119,6 +169,12 @@ class SongEditor extends Component
 
             $spacingClass = $endsWithSpace ? 'mr-1.5 px-0.5' : '-mr-[1px] px-0';
 
+            // Generar el diagrama SVG si existe un acorde a mostrar
+            $svgDiagram = '';
+            if ($displayChord !== '') {
+                $svgDiagram = ChordDiagramService::getSvg($displayChord);
+            }
+
             $html .= sprintf(
                 '<span wire:click="openChordModal(%d, %d, %d, \'%s\')" class="inline-flex flex-col items-start relative group cursor-pointer %s hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors">',
                 $sectionId,
@@ -133,6 +189,18 @@ class SongEditor extends Component
                     '<span class="font-bold text-accent-600 dark:text-accent-400 text-sm h-5 leading-none select-none group-hover:scale-110 transition-transform">%s</span>',
                     htmlspecialchars($displayChord)
                 );
+
+                // Tooltip emergente con el diagrama SVG al pasar el ratón (hover)
+                if (! empty($svgDiagram)) {
+                    $html .= sprintf(
+                        '<span class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-xl rounded-lg p-2 transition-all">'
+                            . '<span class="text-xs font-bold text-zinc-800 dark:text-zinc-200 mb-1">%s</span>'
+                            . '%s'
+                            . '</span>',
+                        htmlspecialchars($displayChord),
+                        $svgDiagram
+                    );
+                }
             } else {
                 $html .= '<span class="h-5 leading-none select-none opacity-0 group-hover:opacity-40 text-xs text-zinc-400">+</span>';
             }
@@ -170,7 +238,6 @@ class SongEditor extends Component
             'position' => $maxPosition + 1,
         ]);
 
-        // Agregamos una primera línea por defecto para la nueva sección
         $section->lines()->create([
             'position' => 1,
             'type' => 'chord_lyrics',
@@ -191,7 +258,7 @@ class SongEditor extends Component
     public function moveSection(int $sectionId, string $direction): void
     {
         $sections = $this->song->sections()->orderBy('position')->get();
-        $currentIndex = $sections->search(fn ($s) => $s->id === $sectionId);
+        $currentIndex = $sections->search(fn($s) => $s->id === $sectionId);
 
         if ($currentIndex === false) {
             return;
@@ -203,7 +270,6 @@ class SongEditor extends Component
             $currentSection = $sections[$currentIndex];
             $targetSection = $sections[$targetIndex];
 
-            // Intercambiar posiciones
             $tempPos = $currentSection->position;
             $currentSection->update(['position' => $targetSection->position]);
             $targetSection->update(['position' => $tempPos]);
@@ -283,7 +349,6 @@ class SongEditor extends Component
         $sectionId = $line->song_section_id;
         $line->delete();
 
-        // Reordenar posiciones en la sección
         $lines = SongLine::where('song_section_id', $sectionId)->orderBy('position')->get();
         foreach ($lines as $index => $l) {
             $l->update(['position' => $index + 1]);
@@ -300,7 +365,7 @@ class SongEditor extends Component
         }
 
         $lines = SongLine::where('song_section_id', $line->song_section_id)->orderBy('position')->get();
-        $currentIndex = $lines->search(fn ($l) => $l->id === $lineId);
+        $currentIndex = $lines->search(fn($l) => $l->id === $lineId);
 
         if ($currentIndex === false) {
             return;
@@ -320,7 +385,6 @@ class SongEditor extends Component
         }
     }
 
-    // Método auxiliar para recargar la relación y regenerar el ChordPro raw
     private function refreshSong(): void
     {
         $this->song->load('sections.lines');
@@ -328,7 +392,7 @@ class SongEditor extends Component
     }
 
     // ==========================================
-    // EDICIÓN RÁPIDA DE ACORDES (DEL PASO 2)
+    // EDICIÓN RÁPIDA DE ACORDES
     // ==========================================
 
     public function openChordModal(int $sectionId, int $lineId, int $segmentIndex, string $currentChord = ''): void

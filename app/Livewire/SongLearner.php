@@ -9,10 +9,72 @@ use Livewire\Component;
 class SongLearner extends Component
 {
     public Song $song;
+    public int $semitones = 0;
+
+    protected static array $chromaticScale = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+    protected static array $flatToSharp = [
+        'Db' => 'C#',
+        'Eb' => 'D#',
+        'Gb' => 'F#',
+        'Ab' => 'G#',
+        'Bb' => 'A#'
+    ];
 
     public function mount(Song $song)
     {
         $this->song = $song->load('sections.lines');
+    }
+
+    public function transpose(int $step)
+    {
+        $this->semitones += $step;
+    }
+
+    public function resetTranspose()
+    {
+        $this->semitones = 0;
+    }
+
+    public function transposeChord(string $chord): string
+    {
+        if ($this->semitones === 0) {
+            return $chord;
+        }
+
+        // Extrae la nota raíz (ej: C#, Bb, F) y la extensión del acorde (ej: m7, maj7)
+        if (! preg_match('/^([A-G][#b]?)(.*)$/', $chord, $matches)) {
+            return $chord;
+        }
+
+        $root = $matches[1];
+        $suffix = $matches[2];
+
+        // Normalizar bemoles a sostenidos para trabajar con una sola escala
+        if (isset(self::$flatToSharp[$root])) {
+            $root = self::$flatToSharp[$root];
+        }
+
+        $index = array_search($root, self::$chromaticScale);
+
+        if ($index === false) {
+            return $chord;
+        }
+
+        $totalNotes = count(self::$chromaticScale);
+        $newIndex = ($index + $this->semitones) % $totalNotes;
+
+        if ($newIndex < 0) {
+            $newIndex += $totalNotes;
+        }
+
+        return self::$chromaticScale[$newIndex] . $suffix;
+    }
+
+    public function getTransposedKeyProperty(): string
+    {
+        $originalKey = $this->song->original_key ?? 'C';
+        return $this->transposeChord($originalKey);
     }
 
     public function renderInteractiveLine(string $content): string
@@ -38,10 +100,13 @@ class SongLearner extends Component
             $html .= '<span class="inline-flex flex-col items-start relative mr-2">';
 
             if ($chord !== '') {
-                // Generamos el SVG del acorde
-                $diagramSvg = ChordDiagramService::getSvg($chord);
+                // Transponemos el acorde antes de renderizar
+                $transposedChord = $this->transposeChord($chord);
 
-                // Envolvemos el acorde en un Popover de Flux UI o HTML tooltip con el SVG
+                // Generamos el SVG del acorde con el tono transpuesto
+                $diagramSvg = ChordDiagramService::getSvg($transposedChord);
+
+                // Envolvemos el acorde en un Popover / Tooltip
                 $html .= sprintf(
                     '<div class="relative group cursor-pointer">
                         <span class="font-bold text-accent-600 dark:text-accent-400 text-base h-6 leading-none select-none border-b border-dashed border-accent-400/50 hover:border-accent-500">%s</span>
@@ -52,8 +117,8 @@ class SongLearner extends Component
                             %s
                         </div>
                     </div>',
-                    htmlspecialchars($chord),
-                    htmlspecialchars($chord),
+                    htmlspecialchars($transposedChord),
+                    htmlspecialchars($transposedChord),
                     $diagramSvg
                 );
             } else {

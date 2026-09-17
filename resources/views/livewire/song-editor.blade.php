@@ -33,27 +33,41 @@
         <!-- Barra de Herramientas -->
         <div class="flex items-center gap-2">
             <!-- Transposición -->
-            <flux:button.group class="inline-flex">
-                <flux:button
-                    wire:click="transpose(-1)"
-                    icon="minus"
-                    size="sm"
-                    tooltip="Bajar semitono (Ctrl + ↓)"
-                />
-                <flux:button
-                    wire:click="resetTranspose"
-                    size="sm"
-                    variant="{{ $semitones !== 0 ? 'subtle' : 'ghost' }}"
-                >
-                    {{ $semitones > 0 ? "+{$semitones}" : $semitones }} st
-                </flux:button>
-                <flux:button
-                    wire:click="transpose(1)"
-                    icon="plus"
-                    size="sm"
-                    tooltip="Subir semitono (Ctrl + ↑)"
-                />
-            </flux:button.group>
+            <div class="flex items-center gap-1">
+                <flux:button.group class="inline-flex">
+                    <flux:button
+                        wire:click="transpose(-1)"
+                        icon="minus"
+                        size="sm"
+                        tooltip="Bajar semitono (Ctrl + ↓)"
+                    />
+                    <flux:button
+                        wire:click="resetTranspose"
+                        size="sm"
+                        variant="{{ $semitones !== 0 ? 'subtle' : 'ghost' }}"
+                    >
+                        {{ $semitones > 0 ? "+{$semitones}" : $semitones }} st
+                    </flux:button>
+                    <flux:button
+                        wire:click="transpose(1)"
+                        icon="plus"
+                        size="sm"
+                        tooltip="Subir semitono (Ctrl + ↑)"
+                    />
+                </flux:button.group>
+
+                @if ($semitones !== 0)
+                    <flux:button
+                        wire:click="saveTransposition"
+                        variant="primary"
+                        size="sm"
+                        icon="check"
+                        tooltip="Guardar este tono de forma permanente"
+                    >
+                        Guardar Tono
+                    </flux:button>
+                @endif
+            </div>
 
             <flux:separator
                 vertical
