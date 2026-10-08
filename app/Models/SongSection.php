@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/** @property-read Collection<int, SongLine> $lines */
 class SongSection extends Model
 {
     protected $fillable = [
@@ -21,6 +23,7 @@ class SongSection extends Model
         return $this->belongsTo(Song::class);
     }
 
+    /** @return HasMany<SongLine, $this> */
     public function lines(): HasMany
     {
         return $this->hasMany(SongLine::class)->orderBy('position');

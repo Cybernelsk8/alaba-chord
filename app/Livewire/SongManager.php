@@ -3,6 +3,11 @@
 namespace App\Livewire;
 
 use App\Models\Song;
+use App\Services\ChordPro\ChordCatalog;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Validation\Rule;
+use Illuminate\View\View;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -26,13 +31,6 @@ class SongManager extends Component
 
     public ?int $tempo = null;
 
-    protected $rules = [
-        'title' => 'required|string|max:255',
-        'artist' => 'nullable|string|max:255',
-        'original_key' => 'required|string|max:10',
-        'tempo' => 'nullable|integer|min:30|max:300',
-    ];
-
     public function updatingSearch(): void
     {
         $this->resetPage();
@@ -49,12 +47,17 @@ class SongManager extends Component
         $this->showCreateModal = true;
     }
 
-    public function createSong()
+    public function createSong(): RedirectResponse
     {
-        $this->validate();
+        $this->validate([
+            'title' => 'required|string|max:255',
+            'artist' => 'nullable|string|max:255',
+            'original_key' => ['required', 'string', Rule::in(ChordCatalog::keys())],
+            'tempo' => 'nullable|integer|min:30|max:300',
+        ]);
 
         $song = Song::create([
-            'user_id' => auth()->id() ?? 1,
+            'user_id' => Auth::id() ?? 1,
             'title' => $this->title,
             'artist' => $this->artist,
             'original_key' => $this->original_key,
@@ -72,13 +75,13 @@ class SongManager extends Component
         Song::destroy($songId);
     }
 
-    public function render()
+    public function render(): View
     {
         $songs = Song::query()
             ->when($this->search, function ($query) {
                 $query->where(function ($q) {
-                    $q->where('title', 'like', '%'.$this->search.'%')
-                        ->orWhere('artist', 'like', '%'.$this->search.'%');
+                    $q->where('title', 'like', '%' . $this->search . '%')
+                        ->orWhere('artist', 'like', '%' . $this->search . '%');
                 });
             })
             ->when($this->filterKey, function ($query) {
@@ -88,7 +91,7 @@ class SongManager extends Component
             ->paginate(12);
 
         // Lista de tonos para el selector de filtro
-        $availableKeys = ['C', 'C#', 'Db', 'D', 'D#', 'Eb', 'E', 'F', 'F#', 'Gb', 'G', 'G#', 'Ab', 'A', 'A#', 'Bb', 'B'];
+        $availableKeys = ChordCatalog::keys();
 
         return view('livewire.song-manager', [
             'songs' => $songs,

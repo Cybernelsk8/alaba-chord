@@ -5,10 +5,21 @@ namespace App\Services\ChordPro;
 class ChordProLine
 {
     // Extrae ["G" => 8, "C" => 15, ...] -> acorde y posición en texto SIN corchetes
+    /** @return list<array{chord: string, position: int}> */
     public static function extractChords(string $content): array
     {
         preg_match_all('/\[([^\]]+)\]/', $content, $matches, PREG_OFFSET_CAPTURE);
-        // ...calcular offset restando corchetes previos
+        $chords = [];
+
+        foreach ($matches[1] as [$chord, $offset]) {
+            $textBeforeChord = self::stripChords(substr($content, 0, $offset - 1));
+            $chords[] = [
+                'chord' => $chord,
+                'position' => mb_strlen($textBeforeChord),
+            ];
+        }
+
+        return $chords;
     }
 
     public static function stripChords(string $content): string
@@ -18,8 +29,6 @@ class ChordProLine
 
     public static function transpose(string $content, int $semitones): string
     {
-        return preg_replace_callback('/\[([^\]]+)\]/', function ($m) use ($semitones) {
-            return '['.ChordTransposer::transpose($m[1], $semitones).']';
-        }, $content);
+        return ChordTransposer::transposeLine($content, $semitones);
     }
 }

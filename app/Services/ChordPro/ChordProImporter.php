@@ -5,185 +5,147 @@ namespace App\Services\ChordPro;
 use App\Models\Song;
 use Illuminate\Support\Facades\DB;
 
+/**
+ * @phpstan-type ParsedLine array{type: string, content: string}
+ * @phpstan-type ParsedSection array{type: string, label: string, lines: list<ParsedLine>}
+ * @phpstan-type PersistedSection array{type: string, label: string, lines: list<ParsedLine>, repeats_section_id?: int|null}
+ */
 class ChordProImporter
 {
     public static function import(string $content, int $userId): Song
     {
-        $userId = $userId ?? auth()->id();
+        $parsed = self::parse($content, ['user_id' => $userId]);
 
-        return DB::transaction(function () use ($content, $userId) {
-            $lines = explode("\n", str_replace(["\r\n", "\r"], "\n", $content));
-
-            $songData = [
-                'user_id' => $userId,
-                'title' => 'Sin título',
-                'meta' => [],
-            ];
-
-            $sections = [];
-            $currentSection = [
-                'type' => 'verse',
-                'label' => 'Verso',
-                'lines' => [],
-            ];
-
-            foreach ($lines as $line) {
-                $line = trim($line);
-                if (empty($line)) {
-                    continue;
-                }
-
-                // 1. Procesar Directivas {directive: value} o {directive}
-                if (preg_match('/^\{([^:]+)(?::\s*(.*))?\}$/', $line, $matches)) {
-                    $directive = strtolower(trim($matches[1]));
-                    $value = isset($matches[2]) ? trim($matches[2]) : null;
-
-                    self::processDirective($directive, $value, $songData, $currentSection, $sections);
-
-                    continue;
-                }
-
-                // 2. Procesar Comentarios o Tablatura
-                $lineType = 'chord_lyrics';
-                if ($currentSection['type'] === 'tab') {
-                    $lineType = 'tab_line';
-                }
-
-                $currentSection['lines'][] = [
-                    'type' => $lineType,
-                    'content' => $line,
-                ];
-            }
-
-            // Guardar la última sección acumulada
-            if (! empty($currentSection['lines'])) {
-                $sections[] = $currentSection;
-            }
-
-            // Inferencia de tono si no venía en el archivo {key: ...}
-            if (empty($songData['original_key'])) {
-                $songData['original_key'] = ChordTransposer::inferKeyFromContent($content);
-            }
-
-            // Persistir en Base de Datos
-            $song = Song::create($songData);
-
-            foreach ($sections as $secIndex => $secData) {
-                $section = $song->sections()->create([
-                    'type' => $secData['type'],
-                    'label' => $secData['label'],
-                    'position' => $secIndex + 1,
-                    'repeats_section_id' => $secData['repeats_section_id'] ?? null,
-                ]);
-
-                foreach ($secData['lines'] as $lineIndex => $lineData) {
-                    $section->lines()->create([
-                        'position' => $lineIndex + 1,
-                        'type' => $lineData['type'],
-                        'content' => $lineData['content'],
-                    ]);
-                }
-            }
+        return DB::transaction(function () use ($parsed) {
+            $song = Song::create($parsed['song']);
+            self::persistSections($song, $parsed['sections']);
 
             return $song;
         });
     }
 
-    private static function processDirective(
-        string $directive,
-        ?string $value,
-        array &$songData,
-        array &$currentSection,
-        array &$sections
-    ): void {
-        switch ($directive) {
-            // Metadatos principales
-            case 'title':
-            case 't':
-                $songData['title'] = $value;
-                break;
-            case 'subtitle':
-            case 'st':
-                $songData['subtitle'] = $value;
-                break;
-            case 'artist':
-                $songData['artist'] = $value;
-                break;
-            case 'key':
-                $songData['original_key'] = $value;
-                break;
-            case 'capo':
-                $songData['capo'] = (int) $value;
-                break;
-            case 'tempo':
-                $songData['tempo'] = (int) $value;
-                break;
-            case 'time':
-                $songData['time_signature'] = $value;
-                break;
+    /** @param array<string, mixed> $defaults
+     * @return array{song: array<string, mixed>, sections: list<ParsedSection>}
+     */
+    public static function parse(string $content, array $defaults = []): array
+    {
+        $allowedSongFields = [
+            'user_id',
+            'title',
+            'subtitle',
+            'artist',
+            'original_key',
+            'capo',
+            'time_signature',
+            'tempo',
+            'duration',
+            'meta',
+        ];
+        $songData = array_replace(
+            ['title' => 'Sin título', 'meta' => []],
+            array_intersect_key($defaults, array_flip($allowedSongFields)),
+        );
+        $songData['meta'] = is_array($songData['meta'] ?? null) ? $songData['meta'] : [];
 
-                // Apertura de Entornos (Secciones)
-            case 'start_of_chorus':
-            case 'soc':
-                self::switchSection('chorus', $value ?? 'Coro', $currentSection, $sections);
-                break;
-            case 'start_of_verse':
-            case 'sov':
-                self::switchSection('verse', $value ?? 'Verso', $currentSection, $sections);
-                break;
-            case 'start_of_bridge':
-            case 'sob':
-                self::switchSection('bridge', $value ?? 'Puente', $currentSection, $sections);
-                break;
-            case 'start_of_tab':
-            case 'sot':
-                self::switchSection('tab', $value ?? 'Tablatura', $currentSection, $sections);
-                break;
+        $sections = [];
+        $currentSection = null;
+        $normalizedContent = str_replace(["\r\n", "\r"], "\n", $content);
 
-                // Cierre de Entornos
-            case 'end_of_chorus':
-            case 'eoc':
-            case 'end_of_verse':
-            case 'eov':
-            case 'end_of_bridge':
-            case 'eob':
-            case 'end_of_tab':
-            case 'eot':
-                self::switchSection('verse', 'Verso', $currentSection, $sections);
-                break;
+        foreach (explode("\n", $normalizedContent) as $line) {
+            $directiveLine = trim($line);
 
-                // Directivas sueltas (Comentarios)
-            case 'comment':
-            case 'c':
-                $currentSection['lines'][] = [
-                    'type' => 'comment',
-                    'content' => $value ?? '',
-                ];
-                break;
+            if (preg_match('/^\{([^:]+)(?::\s*(.*))?\}$/', $directiveLine, $matches)) {
+                $directive = strtolower(trim($matches[1]));
+                $value = isset($matches[2]) ? trim($matches[2]) : null;
+                $metadata = DirectiveMap::metadata($directive);
+                $sectionStart = DirectiveMap::sectionStart($directive);
 
-                // Directiva no estándar -> a JSON meta
-            default:
-                $meta = $songData['meta'] ?? [];
-                $meta[$directive] = $value;
-                $songData['meta'] = $meta;
-                break;
+                if ($metadata !== null) {
+                    $field = $metadata['field'];
+                    $songData[$field] = in_array($field, ['capo', 'tempo'], true)
+                        ? ($value === null || $value === '' ? null : (int) $value)
+                        : $value;
+                } elseif ($sectionStart !== null) {
+                    $sections = self::flushSection($currentSection, $sections);
+                    $currentSection = null;
+                    $currentSection = [
+                        'type' => $sectionStart['type'],
+                        'label' => $value !== null && $value !== '' ? $value : $sectionStart['label'],
+                        'lines' => [],
+                    ];
+                } elseif (DirectiveMap::sectionEnd($directive) !== null) {
+                    $sections = self::flushSection($currentSection, $sections);
+                    $currentSection = null;
+                } elseif (in_array($directive, DirectiveMap::commentAliases(), true)) {
+                    $currentSection ??= self::defaultVerseSection();
+                    $currentSection['lines'][] = [
+                        'type' => 'comment',
+                        'content' => $value ?? '',
+                    ];
+                } else {
+                    $songData['meta'][$directive] = $value;
+                }
+
+                continue;
+            }
+
+            if ($currentSection === null && $line === '') {
+                continue;
+            }
+
+            $currentSection ??= self::defaultVerseSection();
+            $currentSection['lines'][] = [
+                'type' => $currentSection['type'] === 'tab' ? 'tab_line' : 'chord_lyrics',
+                'content' => $line,
+            ];
+        }
+
+        $sections = self::flushSection($currentSection, $sections);
+
+        if (empty($songData['original_key'])) {
+            $songData['original_key'] = ChordTransposer::inferKeyFromContent($content);
+        }
+
+        return ['song' => $songData, 'sections' => $sections];
+    }
+
+    /** @param list<PersistedSection> $sections */
+    public static function persistSections(Song $song, array $sections): void
+    {
+        foreach ($sections as $sectionIndex => $sectionData) {
+            $section = $song->sections()->create([
+                'type' => $sectionData['type'],
+                'label' => $sectionData['label'],
+                'position' => $sectionIndex + 1,
+                'repeats_section_id' => $sectionData['repeats_section_id'] ?? null,
+            ]);
+
+            foreach ($sectionData['lines'] as $lineIndex => $lineData) {
+                $section->lines()->create([
+                    'position' => $lineIndex + 1,
+                    'type' => $lineData['type'],
+                    'content' => $lineData['content'],
+                ]);
+            }
         }
     }
 
-    private static function switchSection(
-        string $type,
-        string $label,
-        array &$currentSection,
-        array &$sections
-    ): void {
-        if (! empty($currentSection['lines'])) {
+    /** @return ParsedSection */
+    private static function defaultVerseSection(): array
+    {
+        return ['type' => 'verse', 'label' => 'Verso', 'lines' => []];
+    }
+
+    /** @param ParsedSection|null $currentSection
+     * @param  list<ParsedSection>  $sections
+     * @return list<ParsedSection>
+     */
+    private static function flushSection(?array $currentSection, array $sections): array
+    {
+        if ($currentSection !== null) {
             $sections[] = $currentSection;
         }
 
-        $currentSection = [
-            'type' => $type,
-            'label' => $label,
-            'lines' => [],
-        ];
+        return $sections;
     }
 }

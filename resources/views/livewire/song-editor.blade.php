@@ -141,6 +141,71 @@
             class="font-mono text-sm leading-relaxed"
             placeholder="Pega o escribe la canción con formato ChordPro..."
         />
+        <details class="rounded border border-zinc-200 dark:border-zinc-700 px-4 py-3">
+            <summary class="cursor-pointer text-sm font-medium text-zinc-700 dark:text-zinc-200">Directivas ChordPro
+                disponibles</summary>
+            <div class="mt-4 grid gap-5 md:grid-cols-2">
+                <div class="space-y-2">
+                    <h3 class="text-xs font-semibold uppercase text-zinc-500">Metadatos</h3>
+                    @foreach ($metadataDirectives as $item)
+                        <div class="flex items-center justify-between gap-2 text-sm">
+                            <span>
+                                <code
+                                    class="text-zinc-700 dark:text-zinc-300">{{ '{' . $item['directive'] . ': valor}' }}</code>
+                                @if ($item['aliases'])
+                                    <span class="text-xs text-zinc-500">({{ implode(', ', $item['aliases']) }})</span>
+                                @endif
+                            </span>
+                            <flux:button
+                                size="xs"
+                                variant="ghost"
+                                wire:click="insertChordProDirective('{{ $item['directive'] }}')"
+                                icon="plus"
+                                tooltip="Insertar directiva"
+                            />
+                        </div>
+                    @endforeach
+                    <div class="flex items-center justify-between gap-2 text-sm">
+                        <code class="text-zinc-700 dark:text-zinc-300">{comment: texto}</code>
+                        <flux:button
+                            size="xs"
+                            variant="ghost"
+                            wire:click="insertChordProDirective('comment')"
+                            icon="plus"
+                            tooltip="Insertar comentario"
+                        />
+                    </div>
+                </div>
+                <div class="space-y-2">
+                    <h3 class="text-xs font-semibold uppercase text-zinc-500">Secciones</h3>
+                    @foreach ($sectionDirectives as $item)
+                        <div class="flex items-center justify-between gap-2 text-sm">
+                            <code
+                                class="text-zinc-700 dark:text-zinc-300">{{ '{' . $item['start'] . ': ' . $item['label'] . '}' }}</code>
+                            <flux:button
+                                size="xs"
+                                variant="ghost"
+                                wire:click="insertChordProDirective('{{ $item['start'] }}')"
+                                icon="plus"
+                                tooltip="Insertar inicio de sección"
+                            />
+                        </div>
+                        @if ($item['end'])
+                            <div class="flex items-center justify-between gap-2 pl-3 text-xs">
+                                <code class="text-zinc-500">{{ '{' . $item['end'] . '}' }}</code>
+                                <flux:button
+                                    size="xs"
+                                    variant="ghost"
+                                    wire:click="insertChordProDirective('{{ $item['end'] }}')"
+                                    icon="plus"
+                                    tooltip="Insertar cierre de sección"
+                                />
+                            </div>
+                        @endif
+                    @endforeach
+                </div>
+            </div>
+        </details>
         <div class="flex justify-end">
             <flux:button
                 wire:click="save"
@@ -212,7 +277,8 @@
                                         {{ $line->content }}
                                     </p>
                                 @elseif($line->type === 'tab_line')
-                                    <pre class="font-mono text-xs text-zinc-600 dark:text-zinc-400 bg-zinc-50 dark:bg-zinc-950 p-2 rounded overflow-x-auto">{{ $line->content }}</pre>
+                                    <pre
+                                        class="font-mono text-xs text-zinc-600 dark:text-zinc-400 bg-zinc-50 dark:bg-zinc-950 p-2 rounded overflow-x-auto">{{ $line->content }}</pre>
                                 @else
                                     <div class="font-mono text-base leading-relaxed flex flex-wrap gap-y-3 items-end">
                                         {!! $this->renderInteractiveLine($line->content, $sectionIndex, $lineIndex, $section->id, $line->id) !!}
@@ -314,25 +380,47 @@
                 <flux:subheading>Ingresa o modifica el acorde para esta posición</flux:subheading>
             </div>
 
+            <p class="text-xs text-zinc-500">Las digitaciones SVG aparecen cuando hay una posición de guitarra
+                disponible.</p>
+
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <flux:select
+                    wire:model="selectedChordRoot"
+                    wire:change="updateSelectedChordFromCatalog"
+                    label="Nota"
+                >
+                    @foreach ($chordRoots as $root)
+                        <option value="{{ $root }}">{{ $root }}</option>
+                    @endforeach
+                </flux:select>
+                <flux:select
+                    wire:model="selectedChordQuality"
+                    wire:change="updateSelectedChordFromCatalog"
+                    label="Calidad"
+                >
+                    @foreach ($chordQualities as $quality)
+                        <option value="{{ $quality }}">{{ $quality === '' ? 'Mayor' : $quality }}</option>
+                    @endforeach
+                </flux:select>
+                <flux:select
+                    wire:model="selectedChordBass"
+                    wire:change="updateSelectedChordFromCatalog"
+                    label="Bajo opcional"
+                >
+                    <option value="">Sin bajo</option>
+                    @foreach ($chordRoots as $root)
+                        <option value="{{ $root }}">{{ $root }}</option>
+                    @endforeach
+                </flux:select>
+            </div>
+
             <flux:input
                 wire:model.defer="selectedChord"
                 wire:keydown.enter="updateChord"
                 label="Acorde"
-                placeholder="ej. G, C#m, D/F#"
+                placeholder="ej. G, C#m7, D/F#"
                 autofocus
             />
-
-            <div class="flex flex-wrap gap-1.5">
-                @foreach (['C', 'D', 'E', 'F', 'G', 'A', 'B', 'm', '7', '#', 'b', '/'] as $symbol)
-                    <flux:button
-                        size="xs"
-                        variant="subtle"
-                        wire:click="$set('selectedChord', '{{ $selectedChord . $symbol }}')"
-                    >
-                        {{ $symbol }}
-                    </flux:button>
-                @endforeach
-            </div>
 
             <div class="flex justify-between items-center pt-2">
                 @if (!empty($selectedChord))
@@ -383,12 +471,9 @@
                 wire:model="newSectionType"
                 label="Tipo de Sección"
             >
-                <option value="verse">Verso</option>
-                <option value="chorus">Coro</option>
-                <option value="bridge">Puente</option>
-                <option value="intro">Introducción</option>
-                <option value="outro">Final / Outro</option>
-                <option value="solo">Solo</option>
+                @foreach ($sectionDirectives as $section)
+                    <option value="{{ $section['type'] }}">{{ $section['label'] }}</option>
+                @endforeach
             </flux:select>
 
             <flux:input

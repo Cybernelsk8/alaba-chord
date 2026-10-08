@@ -67,6 +67,15 @@
 
                     @if ($selectedSetlist)
                         <div class="flex items-center gap-2">
+                            <flux:button
+                                href="{{ route('setlists.markdown', $selectedSetlist->id) }}"
+                                variant="subtle"
+                                icon="document-text"
+                                size="sm"
+                            >
+                                Descargar .md
+                            </flux:button>
+
                             <!-- Descargar Cancionero Completo en PDF -->
                             <flux:button
                                 href="{{ route('setlists.pdf', $selectedSetlist->id) }}"
@@ -229,7 +238,8 @@
 
             <div class="space-y-2 max-h-60 overflow-y-auto">
                 @forelse ($availableSongs as $song)
-                    <div class="flex items-center justify-between p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                    <div
+                        class="flex items-center justify-between p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800">
                         <div>
                             <div class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{{ $song->title }}
                             </div>
@@ -266,11 +276,15 @@
         <div class="space-y-4">
             <flux:heading size="lg">Ajustes para esta presentación</flux:heading>
 
-            <flux:input
+            <flux:select
                 wire:model="customKey"
                 label="Tono de interpretación"
-                placeholder="ej. G#, Bb"
-            />
+            >
+                <option value="">Tono original de la canción</option>
+                @foreach ($availableKeys as $key)
+                    <option value="{{ $key }}">{{ $key }}</option>
+                @endforeach
+            </flux:select>
             <flux:textarea
                 wire:model="notes"
                 label="Nota específica"

@@ -6,10 +6,18 @@ use App\Models\Song;
 use App\Models\SongLine;
 use App\Models\SongSection;
 use App\Services\ChordDiagramService;
+use App\Services\ChordPro\ChordCatalog;
+use App\Services\ChordPro\ChordProExporter;
+use App\Services\ChordPro\ChordProImporter;
 use App\Services\ChordPro\ChordTransposer;
+use App\Services\ChordPro\DirectiveMap;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\View\View;
 use Livewire\Component;
 
+/** @property-read array{newKey: string, useFlats: bool} $transpositionState */
 class SongEditor extends Component
 {
     public Song $song;
@@ -31,6 +39,12 @@ class SongEditor extends Component
 
     public string $selectedChord = '';
 
+    public string $selectedChordRoot = 'C';
+
+    public string $selectedChordQuality = '';
+
+    public string $selectedChordBass = '';
+
     // Modales / Modos del Paso 3 (Edición de Secciones y Líneas)
     public bool $showSectionModal = false;
 
@@ -46,18 +60,18 @@ class SongEditor extends Component
 
     public string $editingLineType = 'chord_lyrics';
 
-    public function mount(Song $song)
+    public function mount(?Song $song = null): void
     {
-        $this->song = $song->load('sections.lines');
+        $this->song = ($song ?? new Song)->load('sections.lines');
         $this->rawChordPro = $this->buildRawChordPro();
     }
 
-    public function transpose(int $delta)
+    public function transpose(int $delta): void
     {
         $this->semitones += $delta;
     }
 
-    public function resetTranspose()
+    public function resetTranspose(): void
     {
         $this->semitones = 0;
     }
@@ -113,18 +127,11 @@ class SongEditor extends Component
 
     private function buildRawChordPro(): string
     {
-        $content = [];
-        foreach ($this->song->sections as $section) {
-            $content[] = '{' . $section->type . ': ' . ($section->label ?? '') . '}';
-            foreach ($section->lines as $line) {
-                $content[] = $line->content;
-            }
-        }
-
-        return implode("\n", $content);
+        return ChordProExporter::export($this->song);
     }
 
-    public function getTranspositionStateProperty()
+    /** @return array{newKey: string, useFlats: bool} */
+    public function getTranspositionStateProperty(): array
     {
         $effectiveKey = $this->song->original_key
             ?? ChordTransposer::inferKeyFromContent($this->rawChordPro)
@@ -229,6 +236,11 @@ class SongEditor extends Component
 
     public function addSection(): void
     {
+        $this->validate([
+            'newSectionType' => ['required', 'string', Rule::in(array_column(DirectiveMap::sectionDefinitions(), 'type'))],
+            'newSectionLabel' => ['nullable', 'string', 'max:255'],
+        ]);
+
         $maxPosition = $this->song->sections()->max('position') ?? 0;
 
         $section = SongSection::create([
@@ -292,6 +304,10 @@ class SongEditor extends Component
 
     public function addLine(int $sectionId, string $type = 'chord_lyrics'): void
     {
+        if (! in_array($type, ['chord_lyrics', 'comment', 'tab_line'], true)) {
+            return;
+        }
+
         $section = SongSection::find($sectionId);
         if (! $section) {
             return;
@@ -326,6 +342,11 @@ class SongEditor extends Component
         if (! $this->editingLineTextId) {
             return;
         }
+
+        $this->validate([
+            'editingLineContent' => ['present', 'string'],
+            'editingLineType' => ['required', 'string', Rule::in(['chord_lyrics', 'comment', 'tab_line'])],
+        ]);
 
         $line = SongLine::find($this->editingLineTextId);
         if ($line) {
@@ -401,7 +422,52 @@ class SongEditor extends Component
         $this->editingLineId = $lineId;
         $this->editingSegmentIndex = $segmentIndex;
         $this->selectedChord = $currentChord;
+        $parts = ChordCatalog::parseChord($currentChord);
+        $this->selectedChordRoot = $parts['root'] ?? 'C';
+        $this->selectedChordQuality = in_array($parts['quality'] ?? '', ChordCatalog::qualities(), true)
+            ? ($parts['quality'] ?? '')
+            : '';
+        $this->selectedChordBass = $parts['bass'] ?? '';
         $this->showChordModal = true;
+    }
+
+    public function updateSelectedChordFromCatalog(): void
+    {
+        if (
+            ! in_array($this->selectedChordRoot, ChordCatalog::roots(), true)
+            || ! in_array($this->selectedChordQuality, ChordCatalog::qualities(), true)
+            || ($this->selectedChordBass !== '' && ! in_array($this->selectedChordBass, ChordCatalog::roots(), true))
+        ) {
+            return;
+        }
+
+        $this->selectedChord = $this->selectedChordRoot
+            . $this->selectedChordQuality
+            . ($this->selectedChordBass !== '' ? '/' . $this->selectedChordBass : '');
+    }
+
+    public function insertChordProDirective(string $directive): void
+    {
+        $snippet = null;
+        $metadata = DirectiveMap::metadata($directive);
+        $section = DirectiveMap::sectionStart($directive);
+
+        if ($metadata !== null) {
+            $snippet = '{' . $metadata['name'] . ': }';
+        } elseif ($section !== null) {
+            $snippet = '{' . DirectiveMap::startDirective($section['type']) . ': ' . $section['label'] . '}';
+        } elseif (($sectionType = DirectiveMap::sectionEnd($directive)) !== null) {
+            $snippet = '{' . DirectiveMap::endDirective($sectionType) . '}';
+        } elseif (in_array($directive, DirectiveMap::commentAliases(), true)) {
+            $snippet = '{comment: }';
+        }
+
+        if ($snippet === null) {
+            return;
+        }
+
+        $prefix = $this->rawChordPro === '' || str_ends_with($this->rawChordPro, "\n") ? '' : "\n";
+        $this->rawChordPro .= $prefix . $snippet . "\n";
     }
 
     public function updateChord(): void
@@ -449,124 +515,64 @@ class SongEditor extends Component
         $this->updateChord();
     }
 
-    public function render()
+    public function render(): View
     {
         return view('livewire.song-editor', [
             'transposition' => $this->transpositionState,
+            'metadataDirectives' => DirectiveMap::metadataDefinitions(),
+            'sectionDirectives' => DirectiveMap::sectionDefinitions(),
+            'chordRoots' => ChordCatalog::roots(),
+            'chordQualities' => ChordCatalog::qualities(),
         ]);
     }
 
-    public function save()
+    public function save(): void
     {
         $this->validate([
             'rawChordPro' => 'required|string',
         ]);
 
+        $parsed = ChordProImporter::parse($this->rawChordPro, [
+            'title' => $this->song->title,
+            'subtitle' => $this->song->subtitle,
+            'artist' => $this->song->artist,
+            'original_key' => $this->song->original_key,
+            'capo' => $this->song->capo,
+            'tempo' => $this->song->tempo,
+            'time_signature' => $this->song->time_signature,
+            'duration' => $this->song->duration,
+            'meta' => $this->song->meta ?? [],
+            'user_id' => $this->song->user_id,
+        ]);
+
         if (! $this->song->exists) {
-            $this->song->user_id = $this->song->user_id ?? auth()->id();
+            $userId = Auth::id();
+            if ($userId !== null && $this->song->getAttribute('user_id') === null) {
+                $this->song->setAttribute('user_id', $userId);
+            }
             $this->song->title = $this->song->title ?? 'Sin título';
             $this->song->save();
         }
 
         $songId = $this->song->id;
 
-        DB::transaction(function () use ($songId) {
+        DB::transaction(function () use ($songId, $parsed) {
             SongSection::where('song_id', $songId)->delete();
-
-            $lines = explode("\n", str_replace(["\r\n", "\r"], "\n", $this->rawChordPro));
-
-            $songData = [
-                'title' => $this->song->title,
-                'meta' => [],
+            $fields = [
+                'title',
+                'subtitle',
+                'artist',
+                'original_key',
+                'capo',
+                'tempo',
+                'time_signature',
+                'duration',
+                'meta',
             ];
+            $songData = array_intersect_key($parsed['song'], array_flip($fields));
+            $this->song->update($songData);
 
-            $sections = [];
-            $currentSection = [
-                'type' => 'verse',
-                'label' => 'Verso',
-                'lines' => [],
-            ];
-
-            foreach ($lines as $line) {
-                $line = trim($line);
-                if (empty($line)) {
-                    continue;
-                }
-
-                if (preg_match('/^\{([^:]+)(?::\s*(.*))?\}$/', $line, $matches)) {
-                    $directive = strtolower(trim($matches[1]));
-                    $value = isset($matches[2]) ? trim($matches[2]) : null;
-
-                    if (in_array($directive, ['title', 't']) && $value) {
-                        $songData['title'] = $value;
-                    }
-                    if (in_array($directive, ['artist']) && $value) {
-                        $songData['artist'] = $value;
-                    }
-                    if (in_array($directive, ['key']) && $value) {
-                        $songData['original_key'] = $value;
-                    }
-                    if (in_array($directive, ['capo']) && $value) {
-                        $songData['capo'] = (int) $value;
-                    }
-                    if (in_array($directive, ['tempo']) && $value) {
-                        $songData['tempo'] = (int) $value;
-                    }
-
-                    if (in_array($directive, ['start_of_chorus', 'soc'])) {
-                        if (! empty($currentSection['lines'])) {
-                            $sections[] = $currentSection;
-                        }
-                        $currentSection = ['type' => 'chorus', 'label' => $value ?? 'Coro', 'lines' => []];
-                    } elseif (in_array($directive, ['start_of_verse', 'sov'])) {
-                        if (! empty($currentSection['lines'])) {
-                            $sections[] = $currentSection;
-                        }
-                        $currentSection = ['type' => 'verse', 'label' => $value ?? 'Verso', 'lines' => []];
-                    } elseif (in_array($directive, ['start_of_bridge', 'sob'])) {
-                        if (! empty($currentSection['lines'])) {
-                            $sections[] = $currentSection;
-                        }
-                        $currentSection = ['type' => 'bridge', 'label' => $value ?? 'Puente', 'lines' => []];
-                    }
-
-                    continue;
-                }
-
-                $currentSection['lines'][] = [
-                    'type' => 'chord_lyrics',
-                    'content' => $line,
-                ];
-            }
-
-            if (! empty($currentSection['lines'])) {
-                $sections[] = $currentSection;
-            }
-
-            $this->song->update([
-                'title' => $songData['title'] ?? $this->song->title,
-                'artist' => $songData['artist'] ?? $this->song->artist,
-                'original_key' => $songData['original_key'] ?? $this->song->original_key,
-                'capo' => $songData['capo'] ?? $this->song->capo,
-                'tempo' => $songData['tempo'] ?? $this->song->tempo,
-            ]);
-
-            foreach ($sections as $secIndex => $secData) {
-                $section = SongSection::create([
-                    'song_id' => $songId,
-                    'type' => $secData['type'],
-                    'label' => $secData['label'],
-                    'position' => $secIndex + 1,
-                ]);
-
-                foreach ($secData['lines'] as $lineIndex => $lineData) {
-                    $section->lines()->create([
-                        'position' => $lineIndex + 1,
-                        'type' => $lineData['type'],
-                        'content' => $lineData['content'],
-                    ]);
-                }
-            }
+            ChordProImporter::persistSections($this->song, $parsed['sections']);
         });
 
         $this->refreshSong();

@@ -5,15 +5,17 @@ namespace App\Http\Controllers;
 use App\Models\Setlist;
 use App\Models\Song;
 use App\Services\ChordPro\ChordTransposer;
+use App\Services\SetlistPdfPaginator;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 
 class SongPdfController extends Controller
 {
     /**
      * Exporta una canción individual a PDF con transposición opcional.
      */
-    public function exportSong(Request $request, Song $song)
+    public function exportSong(Request $request, Song $song): Response
     {
         // Obtiene los semitonos de la Query String (ej. ?semitones=2), por defecto 0
         $semitones = (int) $request->query('semitones', 0);
@@ -34,23 +36,60 @@ class SongPdfController extends Controller
     /**
      * Exporta un repertorio completo a PDF en un solo archivo.
      */
-    public function exportSetlist(Setlist $setlist)
+    public function exportSetlist(Setlist $setlist): Response
     {
         $setlist->load('songs.sections.lines');
 
         $songsData = [];
         foreach ($setlist->songs as $song) {
+            $originalKey = $song->original_key ?? $this->inferSongKey($song);
+            $pivot = $song->getRelation('pivot');
+            $customKey = data_get($pivot, 'custom_key');
+            $targetKey = is_string($customKey) && $customKey !== '' ? $customKey : $originalKey;
+            $semitones = ChordTransposer::semitonesBetweenKeys($originalKey, $targetKey);
+            $notes = data_get($pivot, 'notes');
+
             $songsData[] = [
                 'song' => $song,
-                'htmlContent' => $this->renderSongHtml($song, 0, $song->pivot->custom_key),
-                'customKey' => $song->pivot->custom_key,
-                'notes' => $song->pivot->notes,
+                'htmlContent' => $this->renderSongHtml($song, $semitones, $targetKey, true),
+                'customKey' => $targetKey,
+                'notes' => is_string($notes) ? $notes : null,
+            ];
+        }
+
+        $indexRows = array_chunk(array_map(
+            fn(int $index, array $item) => [
+                'number' => $index + 1,
+                'song' => $item['song'],
+                'key' => $item['customKey'],
+            ],
+            array_keys($songsData),
+            $songsData,
+        ), 2);
+        $indexPages = array_chunk($indexRows, 50);
+        $songPages = $songsData === [] ? [] : SetlistPdfPaginator::paginate($songsData);
+        $pages = [['type' => 'cover', 'pageNumber' => 1]];
+
+        foreach ($indexPages as $rows) {
+            $pages[] = [
+                'type' => 'index',
+                'pageNumber' => count($pages) + 1,
+                'rows' => $rows,
+            ];
+        }
+
+        foreach ($songPages as $songPage) {
+            $pages[] = [
+                'type' => 'songs',
+                'pageNumber' => count($pages) + 1,
+                'columns' => $songPage['columns'],
             ];
         }
 
         $pdf = Pdf::loadView('pdf.setlist', [
             'setlist' => $setlist,
             'songsData' => $songsData,
+            'pages' => $pages,
         ])->setPaper('a4', 'portrait');
 
         return $pdf->download("Repertorio_{$setlist->title}.pdf");
@@ -59,7 +98,10 @@ class SongPdfController extends Controller
     /**
      * Renderiza las líneas de la canción en HTML optimizado para PDF/DomPDF.
      */
-    private function renderSongHtml(Song $song, int $semitones = 0, ?string $targetKey = null): array
+    /**
+     * @return list<array{label: string, lines: list<array{type: string, html?: string, content?: string}>}>
+     */
+    private function renderSongHtml(Song $song, int $semitones = 0, ?string $targetKey = null, bool $compact = false): array
     {
         $renderedSections = [];
 
@@ -69,7 +111,14 @@ class SongPdfController extends Controller
                 if ($line->type === 'chord_lyrics') {
                     $linesHtml[] = [
                         'type' => 'chord_lyrics',
-                        'html' => $this->formatChordProForPdf($line->content, $semitones),
+                        'content' => $line->content,
+                        'html' => $this->formatChordProForPdf(
+                            $line->content,
+                            $semitones,
+                            $targetKey,
+                            $compact,
+                            $section->type === 'chorus',
+                        ),
                     ];
                 } else {
                     $linesHtml[] = [
@@ -80,6 +129,7 @@ class SongPdfController extends Controller
             }
 
             $renderedSections[] = [
+                'type' => $section->type,
                 'label' => $section->label ?? $section->type,
                 'lines' => $linesHtml,
             ];
@@ -88,12 +138,19 @@ class SongPdfController extends Controller
         return $renderedSections;
     }
 
-    private function formatChordProForPdf(string $content, int $semitones = 0): string
-    {
+    private function formatChordProForPdf(
+        string $content,
+        int $semitones = 0,
+        ?string $targetKey = null,
+        bool $compact = false,
+        bool $boldLyrics = false,
+    ): string {
         $pattern = '/\[([^\]]+)\]([^\[]*)|([^\[]+)/';
 
         if (! preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
-            return htmlspecialchars($content);
+            $escapedContent = htmlspecialchars($content);
+
+            return $boldLyrics ? '<strong>' . $escapedContent . '</strong>' : $escapedContent;
         }
 
         $html = '<table style="border-collapse: collapse; margin-bottom: 4px; display: inline-table;"><tr>';
@@ -107,20 +164,36 @@ class SongPdfController extends Controller
             }
 
             $displayChord = $chord;
-            if ($chord !== '' && $semitones !== 0) {
-                $displayChord = ChordTransposer::transposeChord($chord, $semitones);
+            if ($chord !== '' && ($semitones !== 0 || $targetKey !== null)) {
+                $displayChord = ChordTransposer::transposeChord($chord, $semitones, $targetKey);
             }
 
-            $formattedText = str_replace(' ', '&nbsp;', htmlspecialchars($text));
+            $formattedText = $compact
+                ? htmlspecialchars($text)
+                : str_replace(' ', '&nbsp;', htmlspecialchars($text));
+            if ($boldLyrics && $formattedText !== '') {
+                $formattedText = '<strong>' . $formattedText . '</strong>';
+            }
 
             $html .= '<td style="padding: 0; vertical-align: bottom; text-align: left;">';
-            $html .= '<div style="font-weight: bold; color: #2563eb; font-size: 11px; font-family: monospace; height: 14px;">'.htmlspecialchars($displayChord).'</div>';
-            $html .= '<div style="font-size: 13px; font-family: monospace; color: #111827;">'.($formattedText !== '' ? $formattedText : '&nbsp;').'</div>';
+            $html .= '<div style="font-weight: bold; color: #2563eb; font-size: ' . ($compact ? '8' : '11') . 'px; font-family: monospace; height: ' . ($compact ? '10' : '14') . 'px;">' . htmlspecialchars($displayChord) . '</div>';
+            $html .= '<div style="font-size: ' . ($compact ? '9' : '13') . 'px; font-family: monospace; color: #111827; white-space: ' . ($compact ? 'pre-wrap' : 'normal') . ';">' . ($formattedText !== '' ? $formattedText : '&nbsp;') . '</div>';
             $html .= '</td>';
         }
 
         $html .= '</tr></table>';
 
         return $html;
+    }
+
+    private function inferSongKey(Song $song): string
+    {
+        $content = $song->sections
+            ->flatMap(fn($section) => $section->lines
+                ->where('type', 'chord_lyrics')
+                ->pluck('content'))
+            ->implode("\n");
+
+        return ChordTransposer::inferKeyFromContent($content) ?? 'C';
     }
 }

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\SetlistMarkdownController;
 use App\Http\Controllers\SongPdfController;
 use App\Livewire\SetlistManager;
 use App\Livewire\SetlistViewer;
@@ -15,7 +16,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
 
-require __DIR__ . '/settings.php';
+require __DIR__.'/settings.php';
 
 Route::livewire('songs/new', SongEditor::class)->name('songs.new');
 Route::livewire('/songs/{song}/edit', SongEditor::class)->name('songs.edit');
@@ -26,6 +27,7 @@ Route::livewire('setlists/{setlist}/view', SetlistViewer::class)->name('setlists
 
 Route::get('songs/{song}/pdf', [SongPdfController::class, 'exportSong'])->name('songs.pdf');
 Route::get('setlists/{setlist}/pdf', [SongPdfController::class, 'exportSetlist'])->name('setlists.pdf');
+Route::get('setlists/{setlist}/markdown', SetlistMarkdownController::class)->name('setlists.markdown');
 
 Route::livewire('songs/{song}/present', SongPresenter::class)->name('songs.present');
 
